@@ -1,0 +1,803 @@
+<?php
+class News extends CI_Controller
+{
+    
+    public function __construct()
+    {
+        parent::__construct();
+        $this->load->model('news_model');
+    }
+	
+//taken from wordpress
+public function utf8_uri_encode( $utf8_string, $length = 0 ) {
+    $unicode = '';
+    $values = array();
+    $num_octets = 1;
+    $unicode_length = 0;
+
+    $string_length = strlen( $utf8_string );
+    for ($i = 0; $i < $string_length; $i++ ) {
+
+        $value = ord( $utf8_string[ $i ] );
+
+        if ( $value < 128 ) {
+            if ( $length && ( $unicode_length >= $length ) )
+                break;
+            $unicode .= chr($value);
+            $unicode_length++;
+        } else {
+            if ( count( $values ) == 0 ) $num_octets = ( $value < 224 ) ? 2 : 3;
+
+            $values[] = $value;
+
+            if ( $length && ( $unicode_length + ($num_octets * 3) ) > $length )
+                break;
+            if ( count( $values ) == $num_octets ) {
+                if ($num_octets == 3) {
+                    $unicode .= '%' . dechex($values[0]) . '%' . dechex($values[1]) . '%' . dechex($values[2]);
+                    $unicode_length += 9;
+                } else {
+                    $unicode .= '%' . dechex($values[0]) . '%' . dechex($values[1]);
+                    $unicode_length += 6;
+                }
+
+                $values = array();
+                $num_octets = 1;
+            }
+        }
+    }
+
+    return $unicode;
+}
+
+//taken from wordpress
+public function seems_utf8($str) {
+    $length = strlen($str);
+    for ($i=0; $i < $length; $i++) {
+        $c = ord($str[$i]);
+        if ($c < 0x80) $n = 0; # 0bbbbbbb
+        elseif (($c & 0xE0) == 0xC0) $n=1; # 110bbbbb
+        elseif (($c & 0xF0) == 0xE0) $n=2; # 1110bbbb
+        elseif (($c & 0xF8) == 0xF0) $n=3; # 11110bbb
+        elseif (($c & 0xFC) == 0xF8) $n=4; # 111110bb
+        elseif (($c & 0xFE) == 0xFC) $n=5; # 1111110b
+        else return false; # Does not match any model
+        for ($j=0; $j<$n; $j++) { # n bytes matching 10bbbbbb follow ?
+            if ((++$i == $length) || ((ord($str[$i]) & 0xC0) != 0x80))
+                return false;
+        }
+    }
+    return true;
+}
+
+//function sanitize_title_with_dashes taken from wordpress
+public function sanitize($title) {
+    $title = strip_tags($title);
+    // Preserve escaped octets.
+    $title = preg_replace('|%([a-fA-F0-9][a-fA-F0-9])|', '---$1---', $title);
+    // Remove percent signs that are not part of an octet.
+    $title = str_replace('%', '', $title);
+    // Restore octets.
+    $title = preg_replace('|---([a-fA-F0-9][a-fA-F0-9])---|', '%$1', $title);
+
+    if ($this->seems_utf8($title)) {
+        if (function_exists('mb_strtolower')) {
+            $title = mb_strtolower($title, 'UTF-8');
+        }
+        $title = $this->utf8_uri_encode($title, 200);
+    }
+
+    $title = strtolower($title);
+    $title = preg_replace('/&.+?;/', '', $title); // kill entities
+    $title = str_replace('.', '-', $title);
+    $title = preg_replace('/[^%a-z0-9 _-]/', '', $title);
+    $title = preg_replace('/\s+/', '-', $title);
+    $title = preg_replace('|-+|', '-', $title);
+    $title = trim($title, '-');
+
+    return $title;
+}
+
+
+    public function index()
+    {
+		echo '<h1>Synchronizing products:</h1>';
+        $data['news'] = $this->news_model->get_news();
+        
+        $this->load->library('ftp');
+        $config['hostname'] = 'mutznutz.ie';
+        $config['username'] = 'mutznutz';
+        $config['password'] = 'efg!2015fda';
+        $config['debug']    = TRUE;
+        
+        $this->ftp->connect($config);
+        #		$i= 0;
+		// Begin Product Loop
+        foreach ($data['news'] as $news_item) {	
+			
+			echo '<h1>'.$news_item['Name of Item'].'</h1><br/>';
+			echo 'Categories: '.$news_item['Type of Item'].', '.$news_item['SubType'].'<br />';
+			
+			$productname = $news_item['Name of Item'];
+			$productname = $this->sanitize($productname);
+			echo 'URL: '.$productname.'<br />';
+			echo 'Barcode: '.$news_item['BarCode'].'<br />';
+	
+			$barcode   = $news_item['BarCode']; //getting from post value
+			
+			//Category  Start
+			$parcat    = $this->sanitize($news_item['Type of Item']);
+			$subcat = $this->sanitize($news_item['SubType']);
+			echo 'Sanitized Categories: '.$parcat.', '.$subcat.'<br/>';
+			
+			if($parcat != ''){
+				//check if theres a Parent category
+				$getcat = $this->news_model->check_cat_duplicates($parcat);
+				if($getcat == 0){
+					echo 'Inserting Parent Category to Database...';
+					$parcattdata = array(
+						'name' => $news_item['Type of Item'],
+						'slug' => $parcat,
+					);
+					$parent_cat_term_id = $this->news_model->insert_post2($parcattdata, 'wp_terms');
+				} 
+				else {
+					$parent_cat_term_id = $this->news_model->get_cat($parcat);
+				}
+			}
+			else{
+				//check if theres an Uncategorized category
+				$parcat = $this->sanitize('Uncategorized');
+				$getcat = $this->news_model->check_cat_duplicates($parcat);
+				if($getcat == 0){
+						$parcattdata = array(
+							'name' => 'Uncategorized',
+							'slug' => $parcat
+						);
+						$parent_cat_term_id = $this->news_model->insert_post2($parcattdata, 'wp_terms');
+					} 
+					else {
+						$parent_cat_term_id = $this->news_model->get_cat($parcat);
+					}
+			} 
+			echo '<br />Parent Category ID: '.$parent_cat_term_id.'<br />'; 
+			
+			$description = $news_item['Type of Item'];
+			$parcattaxdata = array(
+				//'term_taxonomy_id' => '',
+				'term_id' => $parent_cat_term_id,
+				'taxonomy' => 'product_cat',
+				'description' => $description,
+				'parent' => '0',
+			);
+			$parent_cat_tax_term_id  = $this->news_model->insert_cat($parcattaxdata, 'wp_term_taxonomy');		
+			echo 'Parent Taxonomy ID: '.$parent_cat_tax_term_id.'<br />';
+			
+			if($subcat != ''){
+				//check if theres a Subcategory
+				$subcat = $parcat.'-'.$subcat;
+				$getsubcat = $this->news_model->check_cat_duplicates($subcat);
+				if($getsubcat == 0){
+					$subcattdata = array(
+						'name' => $news_item['SubType'],
+						'slug' => $subcat
+					);
+					$sub_cat_term_id  = $this->news_model->insert_post2($subcattdata, 'wp_terms');
+					}
+					else {
+					$sub_cat_term_id = $this->news_model->get_cat($subcat);
+					}
+				$subcattaxdata = array(
+					//'term_taxonomy_id' => '',
+					'term_id' => $sub_cat_term_id,
+					'taxonomy' => 'product_cat',
+					'parent' => $parent_cat_term_id
+				);
+				$sub_cat_tax_term_id  = $this->news_model->insert_cat($subcattaxdata, 'wp_term_taxonomy');
+				echo 'Subcategory ID: '.$sub_cat_term_id.'<br />'; 
+				echo 'Subcategory Taxonomy ID: '.$sub_cat_tax_term_id.'<br /><br />'; 
+			}else {
+				//check if theres a Subcategory
+				$sub_cat_term_id = 0;
+				$sub_cat_tax_term_id = 0;
+				echo 'Subcategory ID: '.$sub_cat_term_id.'<br />';
+				echo 'Subcategory Taxonomy ID: '.$sub_cat_tax_term_id.'<br /><br />';  
+			}
+			
+			$checkduplicates = $this->news_model->check_duplicates($barcode);
+			$stockquantity = $news_item['Quantity'];
+			echo 'Stock: '.$stockquantity.'<br />';	
+			
+			//$checkduplicates = 1;
+			if($checkduplicates == 0 && $stockquantity > 0) 		
+				{ // Start of If Duplicate Statement
+				echo 'Status: Unique Item Inserted<br />';
+				
+				#echo $news_item['myphoto'];exit;
+				if ($news_item['myphoto'] != "") {
+					#echo $news_item['myphoto'];exit;
+					$data3 = $news_item['myphoto'];
+					
+					#$data = base64_decode($data3);
+					
+					$im = imagecreatefromstring($data3);
+					// assign new width/height for resize purpose
+					
+					if ($im !== false) {
+						
+						// Select the HTTP-Header for the selected filetype 
+						#header('Content-Type: image/png'); // uncomment this code to display image in browser
+						#echo "uploading image for ".$news_item['Name of Item'] ."<br>";
+						// alter or save the image  
+						$tempfname = base64_encode($news_item['Name of Item']);
+						//$tempfname = $productname;
+						$fileName  = 'for_uploads/' . $tempfname . '_n.png'; // path to png image
+						imagealphablending($im, false); // setting alpha blending on
+						imagesavealpha($im, true); // save alphablending setting (important)
+						
+						$newwidth  = 90;
+						$newheight = 90;
+						
+						// Create a new image from the image stream in the string
+						$thumb = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp  = imagepng($im, $fileName);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n.png', $tempfname . '_n.png');
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						//echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$newFilename = 'for_uploads/' . $tempfname . '_n-90x90.png';
+						$resp        = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-90x90.png', $tempfname . '_n-90x90.png');
+						
+						
+						
+						$newwidth  = 150;
+						$newheight = 150;
+						
+						// Create a new image from the image stream in the string
+						$thumb = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp  = imagepng($im, $fileName);
+						
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						#echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$newFilename = 'for_uploads/' . $tempfname . '_n-150x150.png';
+						$resp        = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-150x150.png', $tempfname . '_n-150x150.png');
+						
+						
+						
+						$newwidth  = 168;
+						$newheight = 300;
+						// Create a new image from the image stream in the string
+						$thumb     = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp      = imagepng($im, $fileName);
+						
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						#echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$newFilename = 'for_uploads/' . $tempfname . '_n-150x150.png';
+						$resp        = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-150x150.png', $tempfname . '_n-150x150.png');
+						
+						
+						
+						
+						$newwidth  = 168;
+						$newheight = 300;
+						// Create a new image from the image stream in the string
+						$thumb     = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp      = imagepng($im, $fileName);
+						
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						#echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$newFilename = 'for_uploads/' . $tempfname . '_n-168x300.png';
+						$resp        = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-168x300.png', $tempfname . '_n-168x300.png');
+					   
+					   
+					   
+					   
+						$newwidth  = 300;
+						$newheight = 300;
+						// Create a new image from the image stream in the string
+						$thumb     = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp      = imagepng($im, $fileName);
+						
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						//echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$newFilename = 'for_uploads/' . $tempfname . '_n-300x300.png';
+						$resp        = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-300x300.png', $tempfname . '_n-300x300.png');
+						
+						
+						
+						
+						$newwidth  = 529;
+						$newheight = 270;
+						// Create a new image from the image stream in the string
+						$thumb     = imagecreatetruecolor($newwidth, $newheight);
+						// Generate image and print it
+						$resp      = imagepng($im, $fileName);
+						
+						// resizing png file
+						imagealphablending($thumb, false); // setting alpha blending on
+						imagesavealpha($thumb, true); // save alphablending setting (important)
+						
+						$source = imagecreatefrompng($fileName); // open image
+						imagealphablending($source, true); // setting alpha blending on
+						
+						list($width, $height, $type, $attr) = getimagesize($fileName);
+						//echo '<br>' . $width . '-' . $height . '-' . $type . '-' . $attr . '<br>';
+						
+						imagecopyresampled($thumb, $source, 0, 0, 0, 0, $newwidth, $newheight, $width, $height);
+						$uploadedFilename = $tempfname . '_n.png';
+						$newFilename      = 'for_uploads/' . $tempfname . '_n-529x270.png';
+						$resp             = imagepng($thumb, $newFilename);
+						$this->ftp->upload('for_uploads/' . $tempfname . '_n-529x270.png', $tempfname . '_n-529x270.png');
+						
+						
+						
+						// frees image from memory
+						imagedestroy($im);
+						imagedestroy($thumb);
+						
+						$actual_link = "http://www.mutznutz.ie/wp-content/uploads/" . $uploadedFilename;
+						//echo $actual_link . "<br />";
+						//inserting images in woocommerce
+						//2015-03-14 03:31:08
+						$dt = new DateTime();
+						
+						$dtime = $dt->format('Y-m-d H:i:s');
+						
+						$tdata = array(
+							'post_author' => '1',
+							'post_date' => $dtime,
+							'post_date_gmt' => $dtime,
+							'post_title' => $tempfname,
+							'post_status ' => 'inherit',
+							'comment_status' => 'closed',
+							'ping_status' => 'open',
+							'post_name' => $tempfname,
+							'post_modified' => $dtime,
+							'post_modified_gmt' => $dtime,
+							'post_parent' => '0',
+							'guid' => $actual_link,
+							'menu_order' => '0',
+							'post_type ' => 'attachment',
+							'post_mime_type' => 'image/png',
+							'comment_status' => '0'
+						);
+						
+						// print_r($tdata);
+						
+						$imagepostid = $this->news_model->insert_post($tdata, "wp_posts");
+						
+						echo 'Image Post ID '.$imagepostid.'<br />';
+						
+						#post_id = last id
+						#meta_key = _wp_attached_file
+						#meta_value = filename
+						$valstring   = 'a:5:{s:5:"width";i:539;s:6:"height";i:960;s:4:"file";s:58:"' . $tempfname . '_n.png' . '";s:5:"sizes";a:6:{s:9:"thumbnail";a:4:{s:4:"file";s:58:"' . $tempfname . '_n-150x150.jpg";s:5:"width";i:150;s:6:"height";i:150;s:9:"mime-type";s:10:"image/png";}s:6:"medium";a:4:{s:4:"file";s:58:"' . $tempfname . '_n-168x300.png";s:5:"width";i:168;s:6:"height";i:300;s:9:"mime-type";s:10:"image/png";}s:14:"shop_thumbnail";a:4:{s:4:"file";s:56:"' . $tempfname . '_n-90x90.png";s:5:"width";i:90;s:6:"height";i:90;s:9:"mime-type";s:10:"image/png";}s:12:"shop_catalog";a:4:{s:4:"file";s:58:"' . $tempfname . '_n-150x150.png";s:5:"width";i:150;s:6:"height";i:150;s:9:"mime-type";s:10:"image/png";}s:11:"shop_single";a:4:{s:4:"file";s:58:"' . $tempfname . '_n-300x300.png";s:5:"width";i:300;s:6:"height";i:300;s:9:"mime-type";s:10:"image/png";}s:14:"post-thumbnail";a:4:{s:4:"file";s:58:"' . $tempfname . '_n-529x270.png";s:5:"width";i:539;s:6:"height";i:270;s:9:"mime-type";s:10:"image/png";}}s:10:"image_meta";a:10:{s:8:"aperture";i:0;s:6:"credit";s:0:"";s:6:"camera";s:0:"";s:7:"caption";s:0:"";s:17:"created_timestamp";i:0;s:9:"copyright";s:0:"";s:12:"focal_length";i:0;s:3:"iso";i:0;s:13:"shutter_speed";i:0;s:5:"title";s:0:"";}}';
+						$pictdata    = array(
+							'post_id ' => $imagepostid,
+							'meta_key' => '_wp_attached_file',
+							'meta_value' => $tempfname . '_n.png'
+						);
+						$this->news_model->insert_post($pictdata, "wp_postmeta");
+						// print_r($pictdata);
+						echo '<br />Image ID: ' . $imagepostid;
+						
+						$pictdatametadata = array(
+							'post_id ' => $imagepostid,
+							'meta_key' => '_wp_attachment_metadata',
+							'meta_value' => trim($valstring)
+						);
+						// print_r($pictdatametadata);
+						$this->news_model->insert_post($pictdatametadata, "wp_postmeta");
+						#need to get the last insert id in wp_post to get the the p=?
+						
+						
+						
+						//Add the Product Post
+						
+						$prodid   = $imagepostid + 1;
+						$postdata = array(
+							'ID ' => $prodid,
+							'post_author' => '1',
+							'post_date ' => $dtime,
+							'post_date_gmt' => $dtime,
+							'post_content ' => $imagepostid,
+							'post_title' => $news_item['Name of Item'],
+							'post_name' => $productname,
+							'post_excerpt ' => $news_item['Name of Item'] . '-' . $news_item['SubType'] . '-' . $news_item['SupplierName'],
+							'post_status' => 'publish',
+							'post_modified' => $dtime,
+							'post_modified_gmt ' => $dtime,
+							'guid' => 'http://www.mutznutz.ie/?post_type=product&#038;p=' . $prodid,
+							'post_type ' => 'product'
+						);						
+						$this->news_model->insert_post($postdata, "wp_posts");
+						#echo  $this->last_query();exit;
+						
+						$postparentcatdata = array(
+							'object_id' => $prodid,
+							'term_taxonomy_id' => $parent_cat_tax_term_id,
+							'term_order' => 0,
+						);
+						$postparentcategory  = $this->news_model->insert_post($postparentcatdata, 'wp_term_relationships');
+						
+						$postsubcatdata = array(
+							'object_id' => $prodid,
+							'term_taxonomy_id' => $sub_cat_tax_term_id,
+							'term_order' => 0,
+						);
+						$postsubcategory  = $this->news_model->insert_post($postsubcatdata, 'wp_term_relationships');
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_edit_last',
+							'meta_value' => '1'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_edit_lock',
+							'meta_value' => '1436190059:1'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_thumbnail_id',
+							'meta_value' => $imagepostid
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					 
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_visibility',
+							'meta_value' => 'visible'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_stock_status',
+							'meta_value' => 'instock'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_total_sales',
+							'meta_value' => '0'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_downloadable',
+							'meta_value' => 'no'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_virtual',
+							'meta_value' => 'no'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					 
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_regular_price',
+							'meta_value' => $news_item['Selling Price']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					  
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_purchase_note',
+							'meta_value' => $news_item['Notes']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					  
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_featured',
+							'meta_value' => 'no'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					   
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_weight',
+							'meta_value' => $news_item['Quantity']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_length',
+							'meta_value' => $news_item['PackSize']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_sku',
+							'meta_value' => $news_item['BarCode']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_product_attributes',
+							'meta_value' => 'a:0:{}'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_price',
+							'meta_value' => $news_item['Selling Price']
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_manage_stock',
+							'meta_value' => 'yes'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_backorders',
+							'meta_value' => 'no'
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+					   
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_product_image_gallery',
+							'meta_value' => $imagepostid
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_sale_price',
+							'meta_value' => ''
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_height',
+							'meta_value' => ''
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_sale_price_dates_from',
+							'meta_value' => ''
+						);
+						
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_sale_price_dates_to',
+							'meta_value' => ''
+						);
+							$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_sold_individually',
+							'meta_value' => ''
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						$proddata = array(
+							'post_id' => $prodid,
+							'meta_key' => '_stock',
+							'meta_value' => $stockquantity
+						);
+						$this->news_model->insert_post($proddata, "wp_postmeta");
+						
+						#exit;
+						
+					} else {
+						echo 'An error occurred.';
+					}
+					echo "<br />Done uploading image for " . $news_item['Name of Item'] . "<br/>";
+				}
+				#$this->ftp->close();
+				} 
+			
+			elseif($checkduplicates == 1) 
+			
+				{
+					//echo 'Status: Item Updated!<br />';
+					$findduplicateid = $this->news_model->find_duplicate_id($barcode);
+					echo 'Status: Item with ID number '.$findduplicateid.' Updated!<br />';	
+					$prodid = $findduplicateid;
+					
+					//Add the Product Post
+			/*		$postdata = array(
+						'post_author' => '1',
+						'post_content ' => $news_item['Name of Item'] . '-' . $news_item['SubType'] . '-' . $news_item['SupplierName'],
+						'post_title' => $news_item['Name of Item'],
+						'post_name' => $productname,
+						'post_excerpt ' => $news_item['Name of Item'] . '-' . $news_item['SubType'] . '-' . $news_item['SupplierName'],
+						'post_status' => 'publish',
+						'guid' => 'http://www.mutznutz.ie/?post_type=product&#038;p=' . $prodid,
+						'post_type ' => 'product'
+					);						
+					$this->news_model->insert_post($postdata, "wp_posts", "ID", $prodid);*/
+					
+					$proddata = array(
+						'meta_value' => $news_item['Selling Price']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_regular_price');
+
+					$proddata = array(
+						'meta_value' => $news_item['Notes']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_purchase_note');
+
+
+					$proddata = array(
+						'meta_value' => $news_item['Quantity']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_weight');
+
+
+					$proddata = array(
+						'meta_value' => $news_item['PackSize']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_length');
+
+					$proddata = array(
+						'meta_value' => $news_item['BarCode']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_sku');
+				
+					$proddata = array(
+						'meta_value' => $news_item['Selling Price']
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_price');
+					
+					$proddata = array(
+						'meta_value' => 'yes'
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_manage_stock');
+					
+					$proddata = array(
+						'meta_value' => 'no'
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_backorders');
+				   				
+					$proddata = array(
+						'meta_value' => ''
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_sale_price');
+					
+					$proddata = array(
+						'meta_value' => ''
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_height');
+					
+					$proddata = array(
+						'meta_value' => ''
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_sale_price_dates_from');
+					
+					$proddata = array(
+						'meta_value' => ''
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_sale_price_dates_to');
+					
+					$proddata = array(
+						'meta_value' => ''
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_sold_individually');
+					
+					$proddata = array(
+						'meta_value' => $stockquantity
+					);
+					$this->news_model->update_post($proddata, 'wp_postmeta', 'post_id', $prodid, 'meta_key', '_stock');
+					
+					$postparentcatdata = array(
+						'term_taxonomy_id' => $parent_cat_tax_term_id,
+					);
+					$this->news_model->update_post($proddata, 'wp_term_relationships', 'object_id', $prodid, 'term_order', 0);
+					
+					$postsubcatdata = array(
+						'term_taxonomy_id' => $sub_cat_tax_term_id,
+					);
+					$this->news_model->update_post($proddata, 'wp_term_relationships', 'object_id', $prodid, 'term_order', 0);
+					
+			} elseif($checkduplicates == 0 && $stockquantity < 1) 
+				echo '<h3>No stock... Item Skipped</h3>';
+			
+			{
+			}
+			
+			// End of If Duplicate Statement
+        }
+        
+        $data['title'] = '';
+        
+        $this->load->view('templates/header', $data);
+        $this->load->view('news/index', $data);
+        $this->load->view('templates/footer');
+    }
+    
+    public function view($slug = NULL)
+    {
+        $data['news_item'] = $this->news_model->get_news($slug);
+        
+        if (empty($data['news_item'])) {
+            show_404();
+        }
+        
+        $data['title'] = $data['news_item']['title'];
+        
+        $this->load->view('templates/header', $data);
+        $this->load->view('news/view', $data);
+		$this->load->view('templates/footer');
+    }
+}
